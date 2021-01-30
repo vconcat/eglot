@@ -633,7 +633,12 @@ treated as in `eglot-dbind'."
     :accessor eglot--saved-initargs)
    (inferior-process
     :documentation "Server subprocess started automatically."
-    :accessor eglot--inferior-process))
+    :accessor eglot--inferior-process)
+   (external-roots
+    :documentation
+    "List of non-editable directories also handled by server."
+    :initform (list)
+    :accessor eglot--external-roots))
   :documentation
   "Represents a server. Wraps a process for LSP communication.")
 
@@ -722,6 +727,7 @@ be guessed."
            ((not guessed-mode)
             (eglot--error "Can't guess mode to manage for `%s'" (current-buffer)))
            (t guessed-mode)))
+         (eglot--probing-projects t)
          (project (or (project-current) `(transient . ,default-directory)))
          (guess (cdr (assoc managed-mode eglot-server-programs
                             (lambda (m1 m2)
@@ -1410,6 +1416,22 @@ Use `eglot-managed-p' to determine if current buffer is managed.")
   "Turn off `eglot--managed-mode' unconditionally."
   (eglot--managed-mode -1))
 
+(defvar eglot--probing-projects nil
+  "Bound to t in `eglot--current-server', nil elsewhere.")
+
+(defun eglot--project-try-external-roots (dir)
+  "Probe `eglot--servers-by-project' for a server handling DIR."
+  (when eglot--probing-projects
+    (catch 'found
+      (maphash (lambda (project servers)
+                 (dolist (server servers)
+                   (when (member (expand-file-name dir)
+                                 (eglot--external-roots server))
+                     (throw 'found project))))
+               eglot--servers-by-project))))
+
+(add-hook 'project-find-functions #'eglot--project-try-external-roots t)
+
 (defun eglot-current-server ()
   "Return logical EGLOT server for current buffer, nil if none."
   eglot--cached-server)
@@ -1437,12 +1459,13 @@ If it is activated, also signal textDocument/didOpen."
     (when (and buffer-file-name
                (or
                 eglot--cached-server
-                (setq eglot--cached-server
-                      (cl-find major-mode
-                               (gethash (or (project-current)
-                                            `(transient . ,default-directory))
-                                        eglot--servers-by-project)
-                               :key #'eglot--major-mode))))
+                (let ((eglot--probing-projects t))
+                  (setq eglot--cached-server
+                        (cl-find major-mode
+                                 (gethash (or (project-current)
+                                              `(transient . ,default-directory))
+                                          eglot--servers-by-project)
+                                 :key #'eglot--major-mode)))))
       (setq eglot--unreported-diagnostics `(:just-opened . nil))
       (eglot--managed-mode)
       (eglot--signal-textDocument/didOpen))))
@@ -1975,6 +1998,9 @@ Try to visit the target file for a richer summary line."
                  (start-pos (cl-getf start :character))
                  (end-pos (cl-getf (cl-getf range :end) :character)))
             (list name line start-pos (- end-pos start-pos)))))))
+    (cl-pushnew (expand-file-name (file-name-directory file))
+                (eglot--external-roots (eglot--current-server-or-lose))
+                :test #'equal)
     (xref-make-match summary (xref-make-file-location file line column) length)))
 
 (cl-defmethod xref-backend-identifier-completion-table ((_backend (eql eglot)))
